@@ -1,0 +1,101 @@
+SELECT
+    PNC_SK,
+    LISTAGG(DAYS_IN_LOSS_CAUSE, '>') 
+        WITHIN GROUP (ORDER BY START_DATE) AS DAYS_DISTRIBUTION
+FROM periods_with_end_date
+WHERE DAYS_IN_LOSS_CAUSE IS NOT NULL
+GROUP BY PNC_SK;
+
+-----------------------------------------------------------------
+
+WITH base AS (
+    SELECT
+        PNC_SK,
+        VERSION,
+        FACT_EFF_DATE,
+        FNOL,
+        LOSS_CAUSE,
+
+        LAG(LOSS_CAUSE) OVER (
+            PARTITION BY PNC_SK
+            ORDER BY FACT_EFF_DATE, VERSION
+        ) AS PREV_LOSS_CAUSE
+    FROM your_table
+),
+
+change_flag AS (
+    SELECT
+        *,
+        CASE
+            WHEN PREV_LOSS_CAUSE IS NULL
+              OR PREV_LOSS_CAUSE <> LOSS_CAUSE
+            THEN 1
+            ELSE 0
+        END AS CHANGE_FLAG
+    FROM base
+),
+
+grp AS (
+    SELECT
+        *,
+        SUM(CHANGE_FLAG) OVER (
+            PARTITION BY PNC_SK
+            ORDER BY FACT_EFF_DATE, VERSION
+            ROWS UNBOUNDED PRECEDING
+        ) AS LOSS_CAUSE_GROUP
+    FROM change_flag
+),
+
+periods AS (
+    SELECT
+        PNC_SK,
+        LOSS_CAUSE_GROUP,
+        LOSS_CAUSE,
+        MIN(FACT_EFF_DATE) AS START_DATE
+    FROM grp
+    GROUP BY
+        PNC_SK,
+        LOSS_CAUSE_GROUP,
+        LOSS_CAUSE
+),
+
+periods_with_end_date AS (
+    SELECT
+        PNC_SK,
+        LOSS_CAUSE,
+        START_DATE,
+
+        LEAD(START_DATE) OVER (
+            PARTITION BY PNC_SK
+            ORDER BY START_DATE
+        ) AS END_DATE
+    FROM periods
+),
+
+final AS (
+    SELECT
+        PNC_SK,
+        LOSS_CAUSE,
+        START_DATE,
+        END_DATE,
+        END_DATE - START_DATE AS DAYS_IN_LOSS_CAUSE
+    FROM periods_with_end_date
+)
+
+SELECT
+    PNC_SK,
+
+    LISTAGG(DAYS_IN_LOSS_CAUSE, '>')
+        WITHIN GROUP (ORDER BY START_DATE) AS DAYS_DISTRIBUTION
+
+FROM final
+WHERE DAYS_IN_LOSS_CAUSE IS NOT NULL
+GROUP BY PNC_SK;
+
+
+--------------------------------------------------------------------
+
+LISTAGG(
+    LOSS_CAUSE || ':' || DAYS_IN_LOSS_CAUSE,
+    ' > '
+) WITHIN GROUP (ORDER BY START_DATE) AS LOSS_CAUSE_DISTRIBUTION
