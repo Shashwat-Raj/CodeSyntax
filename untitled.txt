@@ -99,3 +99,85 @@ LISTAGG(
     LOSS_CAUSE || ':' || DAYS_IN_LOSS_CAUSE,
     ' > '
 ) WITHIN GROUP (ORDER BY START_DATE) AS LOSS_CAUSE_DISTRIBUTION
+
+
+_------
+
+WITH base AS (
+    SELECT
+        PNC_SK,
+        VERSION,
+        FACT_EFF_DATE,
+        FNOL,
+        LOSS_CAUSE,
+
+        LAG(LOSS_CAUSE) OVER (
+            PARTITION BY PNC_SK
+            ORDER BY FACT_EFF_DATE, VERSION
+        ) AS PREV_LOSS_CAUSE
+    FROM your_table
+),
+
+change_groups AS (
+    SELECT
+        b.*,
+
+        SUM(
+            CASE
+                WHEN PREV_LOSS_CAUSE IS NULL
+                  OR PREV_LOSS_CAUSE <> LOSS_CAUSE
+                THEN 1
+                ELSE 0
+            END
+        ) OVER (
+            PARTITION BY PNC_SK
+            ORDER BY FACT_EFF_DATE, VERSION
+            ROWS UNBOUNDED PRECEDING
+        ) AS CAUSE_GROUP
+
+    FROM base b
+),
+
+cause_periods AS (
+    SELECT
+        PNC_SK,
+        CAUSE_GROUP,
+        LOSS_CAUSE,
+        MIN(FACT_EFF_DATE) AS FIRST_CAUSE_DATE
+    FROM change_groups
+    GROUP BY
+        PNC_SK,
+        CAUSE_GROUP,
+        LOSS_CAUSE
+),
+
+cause_duration AS (
+    SELECT
+        PNC_SK,
+        LOSS_CAUSE,
+        FIRST_CAUSE_DATE,
+
+        LEAD(FIRST_CAUSE_DATE) OVER (
+            PARTITION BY PNC_SK
+            ORDER BY FIRST_CAUSE_DATE
+        ) AS NEXT_CAUSE_DATE
+
+    FROM cause_periods
+)
+
+SELECT
+    PNC_SK,
+
+    LISTAGG(
+        LOSS_CAUSE || ':' ||
+        (NEXT_CAUSE_DATE - FIRST_CAUSE_DATE),
+        ' > '
+    ) WITHIN GROUP (
+        ORDER BY FIRST_CAUSE_DATE
+    ) AS LOSS_CAUSE_DAYS
+
+FROM cause_duration
+
+WHERE NEXT_CAUSE_DATE IS NOT NULL
+
+GROUP BY PNC_SK;
