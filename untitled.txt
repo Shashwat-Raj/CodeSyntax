@@ -262,3 +262,842 @@ FROM your_table
 GROUP BY
     AGENT,
     CAST(CALL_DT AS DATE);
+
+***********
+
+# ============================================================
+# AUTO-ARIMA FORECASTING MODEL
+# Training  : Jan-2025 to Mar-2026
+# Backtest  : Apr-2026 to Jun-2026
+# Forecast  : Jul-2026 to Dec-2027
+# Models    : Seasonal + Non-Seasonal Auto-ARIMA
+# ============================================================
+!pip install pandas numpy matplotlib scikit-learn pmdarima openpyxl
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+from pmdarima import auto_arima
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score
+)
+
+import warnings
+warnings.filterwarnings("ignore")
+
+
+# ============================================================
+# 1. LOAD DATA
+# ============================================================
+
+file_path = "your_file.csv"
+
+df = pd.read_csv(file_path)
+
+print("Original data:")
+display(df.head())
+
+print("\nColumns:")
+print(df.columns.tolist())
+
+
+# ============================================================
+# 2. DATA CLEANING
+# ============================================================
+
+# Convert Date column to datetime
+df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+# Convert Segment to numeric
+df["Segment"] = pd.to_numeric(df["Segment"], errors="coerce")
+
+# Remove invalid rows
+df = df.dropna(subset=["Date", "Segment"])
+
+# Sort by date
+df = df.sort_values("Date")
+
+print("\nData after cleaning:")
+display(df.head())
+
+print("\nDate range:")
+print(df["Date"].min(), "to", df["Date"].max())
+
+
+# ============================================================
+# 3. AGGREGATE DATA TO MONTHLY LEVEL
+# ============================================================
+
+monthly_df = (
+    df.set_index("Date")
+      .resample("MS")["Segment"]
+      .sum()
+      .reset_index()
+)
+
+print("\nMonthly data:")
+display(monthly_df)
+
+
+# ============================================================
+# 4. CREATE COMPLETE MONTHLY DATE RANGE
+# ============================================================
+
+full_dates = pd.date_range(
+    start="2025-01-01",
+    end="2026-06-01",
+    freq="MS"
+)
+
+monthly_df = (
+    monthly_df
+    .set_index("Date")
+    .reindex(full_dates)
+    .rename_axis("Date")
+    .reset_index()
+)
+
+monthly_df.columns = ["Date", "Segment"]
+
+
+# Check missing months
+print("\nMissing monthly values:")
+print(monthly_df[monthly_df["Segment"].isna()])
+
+
+# If missing months exist, interpolate
+monthly_df["Segment"] = monthly_df["Segment"].interpolate(
+    method="linear"
+)
+
+# Remaining missing values, if any
+monthly_df["Segment"] = monthly_df["Segment"].bfill().ffill()
+
+
+print("\nFinal monthly dataset:")
+display(monthly_df)
+
+
+# ============================================================
+# 5. TRAIN / BACKTEST SPLIT
+# ============================================================
+
+train = monthly_df[
+    (monthly_df["Date"] >= "2025-01-01") &
+    (monthly_df["Date"] <= "2026-03-01")
+].copy()
+
+test = monthly_df[
+    (monthly_df["Date"] >= "2026-04-01") &
+    (monthly_df["Date"] <= "2026-06-01")
+].copy()
+
+y_train = train["Segment"].values
+y_test = test["Segment"].values
+
+print("Training observations :", len(y_train))
+print("Backtest observations :", len(y_test))
+
+print("\nTraining period:")
+print(train["Date"].min(), "to", train["Date"].max())
+
+print("\nBacktest period:")
+print(test["Date"].min(), "to", test["Date"].max())
+
+
+# ============================================================
+# 6. PLOT TRAINING & TEST DATA
+# ============================================================
+
+plt.figure(figsize=(14, 6))
+
+plt.plot(
+    train["Date"],
+    train["Segment"],
+    marker="o",
+    label="Training"
+)
+
+plt.plot(
+    test["Date"],
+    test["Segment"],
+    marker="o",
+    label="Backtest"
+)
+
+plt.axvline(
+    pd.Timestamp("2026-04-01"),
+    linestyle="--",
+    label="Backtest Start"
+)
+
+plt.title("Training vs Backtest Data")
+plt.xlabel("Date")
+plt.ylabel("Segment")
+plt.legend()
+plt.grid(True)
+
+plt.show()
+
+
+# ============================================================
+# 7. DEFINE ACCURACY METRICS
+# ============================================================
+
+def calculate_metrics(actual, predicted):
+
+    actual = np.array(actual)
+    predicted = np.array(predicted)
+
+    mae = mean_absolute_error(actual, predicted)
+
+    rmse = np.sqrt(
+        mean_squared_error(actual, predicted)
+    )
+
+    # Avoid division by zero
+    non_zero = actual != 0
+
+    if non_zero.sum() > 0:
+        mape = np.mean(
+            np.abs(
+                (actual[non_zero] - predicted[non_zero])
+                / actual[non_zero]
+            )
+        ) * 100
+    else:
+        mape = np.nan
+
+    # Symmetric MAPE
+    denominator = (
+        np.abs(actual) + np.abs(predicted)
+    )
+
+    valid = denominator != 0
+
+    if valid.sum() > 0:
+        smape = np.mean(
+            2 * np.abs(
+                actual[valid] - predicted[valid]
+            ) / denominator[valid]
+        ) * 100
+    else:
+        smape = np.nan
+
+    r2 = r2_score(actual, predicted)
+
+    return {
+        "MAE": mae,
+        "RMSE": rmse,
+        "MAPE (%)": mape,
+        "sMAPE (%)": smape,
+        "R2": r2
+    }
+
+
+# ============================================================
+# 8. NON-SEASONAL AUTO-ARIMA
+# ============================================================
+
+print("\n" + "="*60)
+print("NON-SEASONAL AUTO-ARIMA")
+print("="*60)
+
+model_nonseasonal = auto_arima(
+    y_train,
+
+    seasonal=False,
+
+    start_p=0,
+    start_q=0,
+
+    max_p=5,
+    max_q=5,
+
+    d=None,
+
+    test="adf",
+
+    stepwise=True,
+
+    trace=True,
+
+    error_action="ignore",
+
+    suppress_warnings=True,
+
+    max_order=10
+)
+
+print("\nNon-Seasonal Model:")
+print(model_nonseasonal.summary())
+
+
+# ============================================================
+# 9. BACKTEST NON-SEASONAL MODEL
+# ============================================================
+
+pred_nonseasonal = model_nonseasonal.predict(
+    n_periods=len(y_test)
+)
+
+metrics_nonseasonal = calculate_metrics(
+    y_test,
+    pred_nonseasonal
+)
+
+print("\nNon-Seasonal Backtest Metrics:")
+
+for metric, value in metrics_nonseasonal.items():
+    print(f"{metric}: {value:.4f}")
+
+
+# ============================================================
+# 10. SEASONAL AUTO-ARIMA
+# ============================================================
+
+print("\n" + "="*60)
+print("SEASONAL AUTO-ARIMA")
+print("="*60)
+
+model_seasonal = auto_arima(
+    y_train,
+
+    seasonal=True,
+
+    m=12,
+
+    start_p=0,
+    start_q=0,
+
+    max_p=3,
+    max_q=3,
+
+    start_P=0,
+    start_Q=0,
+
+    max_P=2,
+    max_Q=2,
+
+    d=None,
+
+    D=None,
+
+    test="adf",
+
+    stepwise=True,
+
+    trace=True,
+
+    error_action="ignore",
+
+    suppress_warnings=True,
+
+    max_order=10
+)
+
+print("\nSeasonal Model:")
+print(model_seasonal.summary())
+
+
+# ============================================================
+# 11. BACKTEST SEASONAL MODEL
+# ============================================================
+
+pred_seasonal = model_seasonal.predict(
+    n_periods=len(y_test)
+)
+
+metrics_seasonal = calculate_metrics(
+    y_test,
+    pred_seasonal
+)
+
+print("\nSeasonal Backtest Metrics:")
+
+for metric, value in metrics_seasonal.items():
+    print(f"{metric}: {value:.4f}")
+
+
+# ============================================================
+# 12. CREATE BACKTEST COMPARISON TABLE
+# ============================================================
+
+comparison = pd.DataFrame(
+    [metrics_nonseasonal, metrics_seasonal],
+    index=[
+        "Non-Seasonal ARIMA",
+        "Seasonal ARIMA"
+    ]
+)
+
+print("\n" + "="*60)
+print("MODEL COMPARISON")
+print("="*60)
+
+display(comparison.round(4))
+
+
+# ============================================================
+# 13. BACKTEST PREDICTION TABLE
+# ============================================================
+
+backtest_results = test[["Date", "Segment"]].copy()
+
+backtest_results.rename(
+    columns={"Segment": "Actual"},
+    inplace=True
+)
+
+backtest_results["Non_Seasonal_Forecast"] = pred_nonseasonal
+
+backtest_results["Seasonal_Forecast"] = pred_seasonal
+
+backtest_results["Non_Seasonal_Error"] = (
+    backtest_results["Actual"]
+    - backtest_results["Non_Seasonal_Forecast"]
+)
+
+backtest_results["Seasonal_Error"] = (
+    backtest_results["Actual"]
+    - backtest_results["Seasonal_Forecast"]
+)
+
+display(backtest_results.round(2))
+
+
+# ============================================================
+# 14. PLOT BACKTEST PERFORMANCE
+# ============================================================
+
+plt.figure(figsize=(14, 7))
+
+plt.plot(
+    train["Date"],
+    train["Segment"],
+    marker="o",
+    label="Training"
+)
+
+plt.plot(
+    test["Date"],
+    test["Segment"],
+    marker="o",
+    linewidth=3,
+    label="Actual Backtest"
+)
+
+plt.plot(
+    test["Date"],
+    pred_nonseasonal,
+    marker="o",
+    linestyle="--",
+    label="Non-Seasonal Forecast"
+)
+
+plt.plot(
+    test["Date"],
+    pred_seasonal,
+    marker="o",
+    linestyle="--",
+    label="Seasonal Forecast"
+)
+
+plt.axvline(
+    pd.Timestamp("2026-04-01"),
+    linestyle="--",
+    label="Backtest Start"
+)
+
+plt.title("Auto-ARIMA Backtest Performance")
+
+plt.xlabel("Date")
+plt.ylabel("Segment")
+
+plt.legend()
+plt.grid(True)
+
+plt.show()
+
+
+# ============================================================
+# 15. SELECT MODEL
+# ============================================================
+
+# We use sMAPE as the primary selection metric.
+# Lower sMAPE = better.
+
+if (
+    metrics_seasonal["sMAPE (%)"]
+    < metrics_nonseasonal["sMAPE (%)"]
+):
+
+    selected_model_type = "Seasonal"
+    selected_model = model_seasonal
+
+else:
+
+    selected_model_type = "Non-Seasonal"
+    selected_model = model_nonseasonal
+
+
+print("\n" + "="*60)
+print("SELECTED MODEL")
+print("="*60)
+
+print("Selected model:", selected_model_type)
+
+
+# ============================================================
+# 16. RETRAIN SELECTED MODEL ON FULL DATA
+# ============================================================
+
+print("\nRetraining selected model using")
+print("January 2025 to June 2026...")
+
+
+y_full = monthly_df["Segment"].values
+
+
+if selected_model_type == "Seasonal":
+
+    final_model = auto_arima(
+
+        y_full,
+
+        seasonal=True,
+        m=12,
+
+        start_p=0,
+        start_q=0,
+
+        max_p=3,
+        max_q=3,
+
+        start_P=0,
+        start_Q=0,
+
+        max_P=2,
+        max_Q=2,
+
+        d=None,
+        D=None,
+
+        test="adf",
+
+        stepwise=True,
+
+        trace=True,
+
+        error_action="ignore",
+
+        suppress_warnings=True,
+
+        max_order=10
+    )
+
+else:
+
+    final_model = auto_arima(
+
+        y_full,
+
+        seasonal=False,
+
+        start_p=0,
+        start_q=0,
+
+        max_p=5,
+        max_q=5,
+
+        d=None,
+
+        test="adf",
+
+        stepwise=True,
+
+        trace=True,
+
+        error_action="ignore",
+
+        suppress_warnings=True,
+
+        max_order=10
+    )
+
+
+print("\nFinal Model:")
+print(final_model.summary())
+
+
+# ============================================================
+# 17. FORECAST JULY 2026 – DECEMBER 2027
+# ============================================================
+
+future_dates = pd.date_range(
+    start="2026-07-01",
+    end="2027-12-01",
+    freq="MS"
+)
+
+forecast_periods = len(future_dates)
+
+future_forecast, conf_int = final_model.predict(
+    n_periods=forecast_periods,
+    return_conf_int=True,
+    alpha=0.05
+)
+
+
+# ============================================================
+# 18. CREATE FORECAST DATAFRAME
+# ============================================================
+
+forecast_df = pd.DataFrame({
+
+    "Date": future_dates,
+
+    "Forecast": future_forecast,
+
+    "Lower_95_CI": conf_int[:, 0],
+
+    "Upper_95_CI": conf_int[:, 1]
+
+})
+
+
+print("\nFuture Forecast:")
+display(forecast_df.round(2))
+
+
+# ============================================================
+# 19. ADD YEAR & MONTH
+# ============================================================
+
+forecast_df["Year"] = forecast_df["Date"].dt.year
+
+forecast_df["Month"] = forecast_df["Date"].dt.month_name()
+
+
+# ============================================================
+# 20. MONTHLY FORECAST FOR 2026
+# ============================================================
+
+forecast_2026 = forecast_df[
+    forecast_df["Year"] == 2026
+].copy()
+
+print("\n2026 Forecast:")
+display(forecast_2026.round(2))
+
+
+# ============================================================
+# 21. MONTHLY FORECAST FOR 2027
+# ============================================================
+
+forecast_2027 = forecast_df[
+    forecast_df["Year"] == 2027
+].copy()
+
+print("\n2027 Forecast:")
+display(forecast_2027.round(2))
+
+
+# ============================================================
+# 22. COMPLETE FORECAST PLOT
+# ============================================================
+
+plt.figure(figsize=(16, 8))
+
+# Historical actual
+plt.plot(
+    monthly_df["Date"],
+    monthly_df["Segment"],
+    marker="o",
+    label="Actual"
+)
+
+# Forecast
+plt.plot(
+    forecast_df["Date"],
+    forecast_df["Forecast"],
+    marker="o",
+    linestyle="--",
+    label="Forecast"
+)
+
+# Confidence interval
+plt.fill_between(
+    forecast_df["Date"],
+    forecast_df["Lower_95_CI"],
+    forecast_df["Upper_95_CI"],
+    alpha=0.2,
+    label="95% Confidence Interval"
+)
+
+# Forecast starting point
+plt.axvline(
+    pd.Timestamp("2026-07-01"),
+    linestyle="--",
+    label="Forecast Start"
+)
+
+plt.title(
+    f"Auto-ARIMA Forecast ({selected_model_type})"
+)
+
+plt.xlabel("Date")
+plt.ylabel("Segment")
+
+plt.legend()
+plt.grid(True)
+
+plt.show()
+
+
+# ============================================================
+# 23. ACTUAL + BACKTEST + FUTURE FORECAST
+# ============================================================
+
+plt.figure(figsize=(18, 8))
+
+# Training actual
+plt.plot(
+    train["Date"],
+    train["Segment"],
+    marker="o",
+    label="Training Actual"
+)
+
+# Backtest actual
+plt.plot(
+    test["Date"],
+    test["Segment"],
+    marker="o",
+    linewidth=3,
+    label="Backtest Actual"
+)
+
+# Selected model backtest
+selected_backtest = (
+    pred_seasonal
+    if selected_model_type == "Seasonal"
+    else pred_nonseasonal
+)
+
+plt.plot(
+    test["Date"],
+    selected_backtest,
+    marker="o",
+    linestyle="--",
+    label=f"{selected_model_type} Backtest Forecast"
+)
+
+# Future forecast
+plt.plot(
+    forecast_df["Date"],
+    forecast_df["Forecast"],
+    marker="o",
+    linestyle="--",
+    label=f"{selected_model_type} Future Forecast"
+)
+
+# Forecast CI
+plt.fill_between(
+    forecast_df["Date"],
+    forecast_df["Lower_95_CI"],
+    forecast_df["Upper_95_CI"],
+    alpha=0.2,
+    label="95% Confidence Interval"
+)
+
+plt.axvline(
+    pd.Timestamp("2026-04-01"),
+    linestyle="--",
+    label="Backtest Start"
+)
+
+plt.axvline(
+    pd.Timestamp("2026-07-01"),
+    linestyle="--",
+    label="Future Forecast Start"
+)
+
+plt.title(
+    "Complete Auto-ARIMA Forecasting Framework"
+)
+
+plt.xlabel("Date")
+plt.ylabel("Segment")
+
+plt.legend()
+plt.grid(True)
+
+plt.show()
+
+
+# ============================================================
+# 24. PRINT MODEL PARAMETERS
+# ============================================================
+
+print("\n" + "="*60)
+print("MODEL INFORMATION")
+print("="*60)
+
+print("Selected Model :", selected_model_type)
+print("ARIMA Order    :", final_model.order)
+print("Seasonal Order :", final_model.seasonal_order)
+print("AIC            :", final_model.aic())
+
+
+# ============================================================
+# 25. EXPORT RESULTS TO EXCEL
+# ============================================================
+
+output_file = "Auto_ARIMA_Forecast_Results.xlsx"
+
+with pd.ExcelWriter(
+    output_file,
+    engine="openpyxl"
+) as writer:
+
+    monthly_df.to_excel(
+        writer,
+        sheet_name="Monthly_Data",
+        index=False
+    )
+
+    comparison.to_excel(
+        writer,
+        sheet_name="Model_Comparison"
+    )
+
+    backtest_results.to_excel(
+        writer,
+        sheet_name="Backtest",
+        index=False
+    )
+
+    forecast_df.to_excel(
+        writer,
+        sheet_name="Forecast",
+        index=False
+    )
+
+    forecast_2026.to_excel(
+        writer,
+        sheet_name="Forecast_2026",
+        index=False
+    )
+
+    forecast_2027.to_excel(
+        writer,
+        sheet_name="Forecast_2027",
+        index=False
+    )
+
+
+print("\nResults exported successfully:")
+print(output_file)
