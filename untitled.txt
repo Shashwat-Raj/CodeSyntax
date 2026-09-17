@@ -1101,3 +1101,40 @@ with pd.ExcelWriter(
 
 print("\nResults exported successfully:")
 print(output_file)
+///////////////
+SELECT *
+FROM (
+    SELECT
+        AGENT,
+        CAST(LOGIN_TIME AS DATE) AS WORK_DATE,
+        HOUR,
+        ROUND(
+            GREATEST(
+                0,
+                DATEDIFF(
+                    'minute',
+                    GREATEST(LOGIN_TIME, DATEADD('hour', HOUR - 1, CAST(CAST(LOGIN_TIME AS DATE) AS TIMESTAMP))),
+                    LEAST(LOGOUT_TIME, DATEADD('hour', HOUR, CAST(CAST(LOGIN_TIME AS DATE) AS TIMESTAMP)))
+                )
+            ) / 60.0,
+            2
+        ) AS LOGIN_FTE
+    FROM YOUR_TABLE,
+         LATERAL (
+             SELECT SEQ4() + 1 AS HOUR
+             FROM TABLE(GENERATOR(ROWCOUNT => 24))
+         )
+)
+PIVOT (
+    MAX(LOGIN_FTE)
+    FOR HOUR IN (
+        1,2,3,4,5,6,7,8,9,10,11,12,
+        13,14,15,16,17,18,19,20,21,22,23,24
+    )
+)
+ORDER BY AGENT, WORK_DATE;
+
+////////////
+
+
+
