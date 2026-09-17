@@ -1137,4 +1137,50 @@ ORDER BY AGENT, WORK_DATE;
 ////////////
 
 
+WITH HOURLY AS (
+    SELECT
+        EXTRACT(HOUR FROM CALL_TIMESTAMP) + 1 AS HR,
+        COUNT(*) AS TOTAL_CALLS,
+        SUM(IFF(CALL_STATUS = 'ANSWERED', 1, 0)) AS ANSWERED_CALLS,
+        SUM(IFF(CALL_STATUS = 'MISSED', 1, 0)) AS MISSED_CALLS,
+        SUM(IFF(AUX_CODE = 'AUX 0', 1, 0)) AS AUX_0,
+        SUM(IFF(AUX_CODE = 'AUX 1', 1, 0)) AS AUX_1,
+        SUM(IFF(AUX_CODE = 'AUX 2', 1, 0)) AS AUX_2,
+        SUM(IFF(AUX_CODE = 'AUX 3', 1, 0)) AS AUX_3,
+        SUM(IFF(AUX_CODE = 'AUX 4', 1, 0)) AS AUX_4,
+        SUM(IFF(AUX_CODE = 'AUX 5', 1, 0)) AS AUX_5,
+        SUM(IFF(AUX_CODE = 'AUX 6', 1, 0)) AS AUX_6,
+        SUM(IFF(AUX_CODE = 'AUX 7', 1, 0)) AS AUX_7,
+        SUM(IFF(AUX_CODE = 'AUX 8', 1, 0)) AS AUX_8,
+        SUM(IFF(AUX_CODE = 'AUX 9', 1, 0)) AS AUX_9,
+        SUM(IFF(AUX_CODE = 'AUX 10', 1, 0)) AS AUX_10
+    FROM YOUR_TABLE
+    GROUP BY 1
+)
 
+SELECT
+    METRIC,
+    H1, H2, H3, H4, H5, H6,
+    H7, H8, H9, H10, H11, H12,
+    H13, H14, H15, H16, H17, H18,
+    H19, H20, H21, H22, H23, H24
+FROM HOURLY
+UNPIVOT (
+    VALUE FOR METRIC IN (
+        TOTAL_CALLS,
+        ANSWERED_CALLS,
+        MISSED_CALLS,
+        AUX_0, AUX_1, AUX_2, AUX_3, AUX_4, AUX_5,
+        AUX_6, AUX_7, AUX_8, AUX_9, AUX_10
+    )
+)
+PIVOT (
+    MAX(VALUE) FOR HR IN (
+        1 AS H1, 2 AS H2, 3 AS H3, 4 AS H4,
+        5 AS H5, 6 AS H6, 7 AS H7, 8 AS H8,
+        9 AS H9, 10 AS H10, 11 AS H11, 12 AS H12,
+        13 AS H13, 14 AS H14, 15 AS H15, 16 AS H16,
+        17 AS H17, 18 AS H18, 19 AS H19, 20 AS H20,
+        21 AS H21, 22 AS H22, 23 AS H23, 24 AS H24
+    )
+);
