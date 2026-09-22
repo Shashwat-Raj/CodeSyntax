@@ -1,3 +1,18 @@
+SELECT *
+FROM your_table
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY loss_sk
+    ORDER BY loss_count DESC
+) = 1;
+
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY loss_sk
+    ORDER BY loss_count DESC, updated_date DESC
+) = 1;
+
+
+
+
 SELECT
     PNC_SK,
     LISTAGG(DAYS_IN_LOSS_CAUSE, '>') 
