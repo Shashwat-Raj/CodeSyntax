@@ -1184,3 +1184,1103 @@ PIVOT (
         21 AS H21, 22 AS H22, 23 AS H23, 24 AS H24
     )
 );
+
+--------------------------------------------------------------insight -1 ----------------------------------
+Claim Loss Cause / Segment Insights — Notebook Code
+All cells from claim_insights_notebook.ipynb, in order. Monospace font preserves exact indentation for copy/paste.
+Claim Loss Cause / Segment Insights — Presentation-Ready
+Run cells top to bottom. Only the **CONFIG** cell needs editing.
+Every chart is:
+styled consistently (clean, labeled, no clutter) so you can screenshot it straight into slides
+automatically saved as a PNG** to `chart_exports/` at presentation resolution, so you don't have to screenshot at all — just drag the
+files into PowerPoint
+every table is also saved as a `.csv` to `chart_exports/tables/` for backup/appendix use
+Each cut also prints a short **Key Callouts** block — plain-text bullets you can paste directly into slide notes or a summary slide.
+Covers, for each of 4 business cuts (**Overall**, **Property‑Catastrophe**, **Property‑Non‑Catastrophe**, **Non‑Injury**):
+1. FNOL to latest status — days distribution
+2. Loss‑cause day movement — per‑cause day stats, first→last cause heatmaps (frequency & avg days), total journey‑length distribution
+3. Line of business breakdown
+4. Does a loss‑cause change trigger a segment change?
+5. Contact method breakdown
+Plus a final **cross-cut comparison** section for an overview/summary slide.
+All numbers are shown as-is (counts, percentages, simple averages) — no statistical modeling.
+Setup
+[ code cell 1 ]
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from IPython.display import display
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", 150)
+# ---- Presentation styling ---
+PRIMARY = "#2E5C8A"     # main bar color
+ACCENT = "#DA8A2D"      # secondary bar color
+Page 1
+GOOD = "#4E8B5C"        # tertiary
+PALETTE_SERIES = [PRIMARY, ACCENT, GOOD, "#8172B2", "#C44E52"]
+plt.rcParams.update({
+    "figure.dpi": 110,
+    "savefig.dpi": 220,
+    "font.size": 11,
+    "axes.titlesize": 14,
+    "axes.titleweight": "bold",
+    "axes.labelsize": 11,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": True,
+    "grid.alpha": 0.3,
+    "font.family": "sans-serif",
+})
+Config — edit this
+[ code cell 2 ]
+INPUT_CSV = "your_claims.csv"     # <-- change this to your file path
+OUTPUT_DIR = "chart_exports"       # PNGs + backup CSVs land here, ready to drag into slides
+CHART_DIR = os.path.join(OUTPUT_DIR, "charts")
+TABLE_DIR = os.path.join(OUTPUT_DIR, "tables")
+os.makedirs(CHART_DIR, exist_ok=True)
+os.makedirs(TABLE_DIR, exist_ok=True)
+Load data
+[ code cell 3 ]
+df = pd.read_csv(INPUT_CSV, dtype=str)
+for col in ["CAUSE_CHANGE_COUNT", "SEGMENT_TRANFER_COUNT", "FNOL_EFF_DIFF"]:
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+print(f"Loaded {len(df):,} claims, {df.shape[1]} columns")
+df.head()
+Page 2
+Define the 4 business cuts
+[ code cell 4 ]
+cuts = {
+    "Overall": df,
+    "Property - Catastrophe": df[(df["NEW_SEGMENT"] == "Property") & (df["CAT_IND"] == "Y")],
+    "Property - Non-Catastrophe": df[(df["NEW_SEGMENT"] == "Property") & (df["CAT_IND"] == "N")],
+    "Non-Injury": df[df["NEW_SEGMENT"] == "Non-Injury"],
+}
+for name, d in cuts.items():
+    print(f"{name:30s} {len(d):>8,} claims")
+Save / styling helpers
+[ code cell 5 ]
+def slug(text):
+    return "".join(c.lower() if c.isalnum() else "_" for c in text).strip("_")
+def save_fig(fig, cut_name, chart_name):
+    path = os.path.join(CHART_DIR, f"{slug(cut_name)}__{chart_name}.png")
+    fig.savefig(path, bbox_inches="tight")
+    return path
+def save_table(dframe, cut_name, table_name, index=False):
+    path = os.path.join(TABLE_DIR, f"{slug(cut_name)}__{table_name}.csv")
+    dframe.to_csv(path, index=index)
+    return path
+def styled_bar(ax, categories, values, title, ylabel="Claim Count", color=PRIMARY, value_fmt="{:,.0f}"):
+    bars = ax.bar(categories, values, color=color, width=0.62)
+    for bar, v in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                 value_fmt.format(v), ha="center", va="bottom", fontsize=10, fontweight="bold")
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.margins(y=0.15)
+    ax.tick_params(axis="x", labelrotation=0)
+Page 3
+    ax.yaxis.grid(True, alpha=0.3)
+    ax.xaxis.grid(False)
+    return ax
+Analysis functions
+All five insights, defined once and reused for every cut.
+[ code cell 6 ]
+FNOL_BINS = [-1, 1, 3, 7, 14, 30, np.inf]
+FNOL_LABELS = ["0-1", "2-3", "4-7", "8-14", "15-30", "30+"]
+DAYS_BINS = [-1, 5, 10, 20, 30, 50, np.inf]
+DAYS_LABELS = ["0-5", "6-10", "11-20", "21-30", "31-50", "50+"]
+def fnol_analysis(d):
+    valid = d["FNOL_EFF_DIFF"].dropna()
+    bucketed = pd.cut(valid, bins=FNOL_BINS, labels=FNOL_LABELS)
+    counts = bucketed.value_counts().reindex(FNOL_LABELS).fillna(0).astype(int)
+    pct = (counts / max(len(valid), 1) * 100).round(1)
+    table = pd.DataFrame({"Days Bucket": FNOL_LABELS, "Claim Count": counts.values, "% of Claims": pct.values})
+    summary = pd.DataFrame({
+        "Metric": ["Min Days", "Median Days", "Average Days", "Max Days", "Claim Count"],
+        "Value": [
+            round(valid.min(), 1) if len(valid) else 0,
+            round(valid.median(), 1) if len(valid) else 0,
+            round(valid.mean(), 1) if len(valid) else 0,
+            round(valid.max(), 1) if len(valid) else 0,
+            len(valid),
+        ],
+    })
+    return table, summary
+def parse_cause_days(s):
+    if pd.isna(s) or str(s).strip() == "":
+        return []
+    out = []
+    for part in str(s).split(">"):
+        part = part.strip()
+Page 4
+        if not part or ":" not in part:
+            continue
+        cause, days = part.rsplit(":", 1)
+        try:
+            out.append((cause.strip(), int(days.strip())))
+        except ValueError:
+            continue
+    return out
+def cause_days_analysis(d):
+    chains = d["CAUSE_DAYS_DISTRIBUTION"].apply(parse_cause_days)
+    first_last = []
+    per_cause_days = {}
+    total_days_per_claim = []
+    for chain in chains:
+        if not chain:
+            continue
+        causes = [c for c, _ in chain]
+        days_list = [dd for _, dd in chain]
+        first_last.append((causes[0], causes[-1], sum(days_list)))
+        total_days_per_claim.append(sum(days_list))
+        for c, dd in chain:
+            per_cause_days.setdefault(c, []).append(dd)
+    fl_df = pd.DataFrame(first_last, columns=["First Cause", "Last Cause", "Total Days"])
+    freq_heatmap = pd.crosstab(fl_df["First Cause"], fl_df["Last Cause"]) if len(fl_df) else pd.DataFrame()
+    days_heatmap = (fl_df.pivot_table(index="First Cause", columns="Last Cause",
+                                       values="Total Days", aggfunc="mean").round(1)
+                     if len(fl_df) else pd.DataFrame())
+    cause_rows = []
+    for c, vals in per_cause_days.items():
+        cause_rows.append({
+            "Loss Cause": c,
+            "Times Occurred": len(vals),
+            "Total Days (sum)": int(sum(vals)),
+            "Avg Days (when present)": round(float(np.mean(vals)), 1),
+            "Median Days": round(float(np.median(vals)), 1),
+        })
+    cause_stats = pd.DataFrame(cause_rows).sort_values("Times Occurred", ascending=False).reset_index(drop=True)
+Page 5
+    n_single = sum(1 for c in chains if len(c) == 1)
+    n_multi = sum(1 for c in chains if len(c) > 1)
+    n_total = max(n_single + n_multi, 1)
+    single_multi = pd.DataFrame({
+        "Claim Type": ["Single Loss Cause", "Multiple Loss Causes"],
+        "Claim Count": [n_single, n_multi],
+        "% of Claims": [round(n_single / n_total * 100, 1), round(n_multi / n_total * 100, 1)],
+    })
+    total_days_series = pd.Series(total_days_per_claim, dtype=float)
+    bucketed = pd.cut(total_days_series, bins=DAYS_BINS, labels=DAYS_LABELS)
+    days_counts = bucketed.value_counts().reindex(DAYS_LABELS).fillna(0).astype(int)
+    days_pct = (days_counts / max(len(total_days_series), 1) * 100).round(1)
+    total_days_table = pd.DataFrame({
+        "Total Journey Days": DAYS_LABELS, "Claim Count": days_counts.values, "% of Claims": days_pct.values
+    })
+    return {
+        "freq_heatmap": freq_heatmap, "days_heatmap": days_heatmap, "cause_stats": cause_stats,
+        "single_vs_multi": single_multi, "total_days_table": total_days_table,
+        "total_days_series": total_days_series, "fl_df": fl_df,
+    }
+def breakdown_table(d, col, label):
+    counts = d[col].value_counts()
+    pct = (counts / max(len(d), 1) * 100).round(1)
+    return pd.DataFrame({label: counts.index, "Claim Count": counts.values, "% of Claims": pct.values})
+def cause_to_segment(d):
+    dd = d.copy()
+    dd["Cause Changed?"] = np.where(dd["CAUSE_CHANGE_COUNT"] > 0, "Cause Changed (1+)", "No Cause Change")
+    dd["Segment Changed?"] = np.where(dd["SEGMENT_TRANFER_COUNT"] > 0, "Segment Changed (1+)", "No Segment Change")
+    ct = pd.crosstab(dd["Cause Changed?"], dd["Segment Changed?"])
+    ct_pct_row = ct.div(ct.sum(axis=1), axis=0).mul(100).round(1)
+    cause_changed = dd[dd["Cause Changed?"] == "Cause Changed (1+)"]
+    trigger_rate = (round((cause_changed["Segment Changed?"] == "Segment Changed (1+)").mean() * 100, 1)
+                     if len(cause_changed) else 0.0)
+    headline = pd.DataFrame({
+        "Metric": ["Claims with a Cause Change", "...of those, % that ALSO had a Segment Change"],
+        "Value": [len(cause_changed), trigger_rate],
+    })
+    return ct, ct_pct_row, headline, trigger_rate
+Page 6
+Report function
+Runs all 5 insights for one cut: prints Key Callouts, displays every table, builds every chart, and saves everything to
+`chart_exports/`.
+[ code cell 7 ]
+def run_report(name, d):
+    print("=" * 95)
+    print(f"{name}  —  {len(d):,} claims")
+    print("=" * 95)
+    if len(d) == 0:
+        print("(no claims in this cut)")
+        return {}
+    results = {"cut": name, "n_claims": len(d)}
+    # ---------- 1. FNOL ---------
+    fnol_table, fnol_summary = fnol_analysis(d)
+    print("\n--- 1. FNOL to Latest Status (FNOL_EFF_DIFF) ---")
+    display(fnol_table); display(fnol_summary)
+    save_table(fnol_table, name, "1_fnol_distribution")
+    fig, ax = plt.subplots(figsize=(7.5, 4))
+    styled_bar(ax, fnol_table["Days Bucket"], fnol_table["Claim Count"],
+               f"{name}: FNOL to Latest Status — Days Distribution")
+    save_fig(fig, name, "1_fnol_distribution")
+    plt.show()
+    results["avg_fnol_days"] = fnol_summary.loc[fnol_summary["Metric"] == "Average Days", "Value"].iloc[0]
+    # ---------- 2. Loss-cause day movement ---------
+    print("\n--- 2. Loss-Cause Day Movement (CAUSE_DAYS_DISTRIBUTION) ---")
+    cd = cause_days_analysis(d)
+    print("Single vs multiple loss-cause claims:")
+    display(cd["single_vs_multi"])
+    save_table(cd["single_vs_multi"], name, "2a_single_vs_multi_cause")
+    print("Per-cause day stats:")
+    display(cd["cause_stats"])
+Page 7
+    save_table(cd["cause_stats"], name, "2b_per_cause_day_stats")
+    print("Total journey length per claim (sum of days across the full cause chain):")
+    display(cd["total_days_table"])
+    save_table(cd["total_days_table"], name, "2c_total_journey_days")
+    fig, ax = plt.subplots(figsize=(7.5, 4))
+    styled_bar(ax, cd["total_days_table"]["Total Journey Days"], cd["total_days_table"]["Claim Count"],
+               f"{name}: Total Days in Loss-Cause Journey (per claim)", color=GOOD)
+    save_fig(fig, name, "2c_total_journey_days")
+    plt.show()
+    if len(cd["freq_heatmap"]):
+        fig, axes = plt.subplots(1, 2, figsize=(15.5, 6))
+        sns.heatmap(cd["freq_heatmap"], annot=True, fmt="d", cmap="Blues", ax=axes[0],
+                    cbar_kws={"label": "Claim Count"}, linewidths=0.5, linecolor="white")
+        axes[0].set_title(f"{name}: First → Last Cause — Frequency")
+        sns.heatmap(cd["days_heatmap"], annot=True, fmt=".1f", cmap="Oranges", ax=axes[1],
+                    cbar_kws={"label": "Avg Days"}, linewidths=0.5, linecolor="white")
+        axes[1].set_title(f"{name}: First → Last Cause — Avg Total Days")
+        plt.tight_layout()
+        save_fig(fig, name, "2d_first_last_cause_heatmaps")
+        plt.show()
+        save_table(cd["freq_heatmap"].reset_index(), name, "2d_first_last_cause_frequency", index=False)
+        save_table(cd["days_heatmap"].reset_index(), name, "2d_first_last_cause_avg_days", index=False)
+        results["top_first_cause"] = cd["cause_stats"].iloc[0]["Loss Cause"] if len(cd["cause_stats"]) else "n/a"
+    else:
+        print("(not enough data to build the first->last cause heatmap for this cut)")
+    # ---------- 3. Line of business ---------
+    print("\n--- 3. Line of Business Breakdown ---")
+    lob = breakdown_table(d, "LINE_OF_BUSINESS", "Line of Business")
+    display(lob)
+    save_table(lob, name, "3_line_of_business")
+    fig, ax = plt.subplots(figsize=(7.5, 4))
+    styled_bar(ax, lob["Line of Business"], lob["Claim Count"], f"{name}: Claims by Line of Business", color=ACCENT)
+    save_fig(fig, name, "3_line_of_business")
+    plt.show()
+    if len(lob):
+        results["top_lob"] = f"{lob.iloc[0]['Line of Business']} ({lob.iloc[0]['% of Claims']}%)"
+    # ---------- 4. Cause change -> Segment change ---------
+    print("\n--- 4. Does a Loss-Cause Change Trigger a Segment Change? ---")
+    ct, ct_pct, headline, trigger_rate = cause_to_segment(d)
+Page 8
+    display(headline)
+    print("Counts:"); display(ct)
+    print("Row %:"); display(ct_pct)
+    save_table(headline, name, "4_cause_to_segment_headline")
+    save_table(ct.reset_index(), name, "4_cause_to_segment_counts")
+    save_table(ct_pct.reset_index(), name, "4_cause_to_segment_pct")
+    results["trigger_rate"] = trigger_rate
+    # ---------- 5. Contact method ---------
+    print("\n--- 5. Contact Method Breakdown ---")
+    cm = breakdown_table(d, "CONTACT_METHOD", "Contact Method")
+    display(cm)
+    save_table(cm, name, "5_contact_method")
+    fig, ax = plt.subplots(figsize=(7.5, 4))
+    styled_bar(ax, cm["Contact Method"], cm["Claim Count"], f"{name}: Claims by Contact Method", color="#8172B2")
+    save_fig(fig, name, "5_contact_method")
+    plt.show()
+    if len(cm):
+        results["top_contact_method"] = f"{cm.iloc[0]['Contact Method']} ({cm.iloc[0]['% of Claims']}%)"
+    # ---------- Key callouts (paste-ready bullets) ---------
+    print("\n--- KEY CALLOUTS (paste into slide notes) ---")
+    n_claims_val = results["n_claims"]
+    avg_fnol_val = results.get("avg_fnol_days", "n/a")
+    multi_cause_pct = cd["single_vs_multi"].iloc[1]["% of Claims"]
+    top_lob_val = results.get("top_lob", "n/a")
+    top_contact_val = results.get("top_contact_method", "n/a")
+    bullets = [
+        f"* {name}: {n_claims_val:,} claims analyzed",
+        f"* Average FNOL-to-latest-status gap: {avg_fnol_val} days",
+        f"* {multi_cause_pct}% of claims had multiple loss causes",
+        f"* Top line of business: {top_lob_val}",
+        f"* Top contact method: {top_contact_val}",
+        f"* When the loss cause changes, a segment change also happens {trigger_rate}% of the time",
+    ]
+    for b in bullets:
+        print(b)
+    print("\n")
+    results["summary_bullets"] = bullets
+    return results
+Page 9
+1. Overall
+[ code cell 8 ]
+overall_results = run_report("Overall", cuts["Overall"])
+2. Property — Catastrophe
+[ code cell 9 ]
+propcat_results = run_report("Property - Catastrophe", cuts["Property - Catastrophe"])
+3. Property — Non-Catastrophe
+[ code cell 10 ]
+propnoncat_results = run_report("Property - Non-Catastrophe", cuts["Property - Non-Catastrophe"])
+4. Non-Injury
+[ code cell 11 ]
+noninjury_results = run_report("Non-Injury", cuts["Non-Injury"])
+5. Cross-Cut Comparison — Overview Slide
+A quick side-by-side of the 4 cuts. Good as the first "at a glance" chart in the deck.
+[ code cell 12 ]
+all_results = [overall_results, propcat_results, propnoncat_results, noninjury_results]
+all_results = [r for r in all_results if r]
+comparison = pd.DataFrame({
+    "Cut": [r["cut"] for r in all_results],
+    "Claim Count": [r["n_claims"] for r in all_results],
+    "Avg FNOL Days": [r.get("avg_fnol_days", np.nan) for r in all_results],
+    "Cause-Change -> Segment-Change Trigger Rate (%)": [r.get("trigger_rate", np.nan) for r in all_results],
+})
+display(comparison)
+save_table(comparison, "cross_cut", "comparison_summary")
+fig, axes = plt.subplots(1, 3, figsize=(17, 4.5))
+styled_bar(axes[0], comparison["Cut"], comparison["Claim Count"], "Claim Volume by Cut", color=PRIMARY)
+styled_bar(axes[1], comparison["Cut"], comparison["Avg FNOL Days"], "Avg FNOL-to-Latest-Status Days by Cut",
+Page 10
+           ylabel="Days", color=ACCENT, value_fmt="{:,.1f}")
+styled_bar(axes[2], comparison["Cut"], comparison["Cause-Change -> Segment-Change Trigger Rate (%)"],
+           "Cause-Change -> Segment-Change Trigger Rate", ylabel="%", color=GOOD, value_fmt="{:,.1f}%")
+for ax in axes:
+    ax.tick_params(axis="x", labelrotation=20)
+plt.tight_layout()
+save_fig(fig, "cross_cut", "comparison_overview")
+plt.show()
+print(f"\nAll charts saved to: {os.path.abspath(CHART_DIR)}")
+print(f"All backup tables saved to: {os.path.abspath(TABLE_DIR)}")
+Page 11
+
+
+-------------------------------------------------------------------------------insight 2-------------------------
+Claims Loss-Cause Journey — Jupyter Notebook Code
+Complete copy/paste version of the business-analysis notebook. Code is rendered in a monospaced font with preserved indentation and line breaks.
+Usage: Copy each code block into a separate Jupyter Notebook code cell. Markdown sections are included as headings/context.
+Claims Loss-Cause Journey — Business Analysis Notebook
+**Purpose:** Run this notebook against your claims CSV and automatically produce business-ready tables, graphs, KPI summaries, and presentation-ready PNGs.
+Required business views
+1. Overall
+2. Property – Catastrophe (`NEW_SEGMENT = Property` + `CAT_IND = Y`)
+3. Property – Non-Catastrophe (`NEW_SEGMENT = Property` + `CAT_IND = N`)
+4. Non-Injury (`NEW_SEGMENT = Non-Injury`)
+Business questions answered- How long is the journey from FNOL to the latest information?- How long does a claim spend in each loss cause?- What are the most common first fi last loss-cause journeys?- How does the portfolio break down by Line of Business?- How often does a cause change co-occur with a segment transfer?- How does claim behaviour vary by Contact Method?- Do repeated cause changes correspond to longer journeys / more segment transfers?
+**Important:** the notebook uses only the fields supplied. Cause-change and segment-transfer analysis is reported as association/co-occurrence, not causal proof.
+Code Cell 1
+# ============================================================
+# 0. USER SETTINGS — CHANGE ONLY THIS SECTION
+# ============================================================
+CSV_PATH = "claims_data.csv"
+# Folder where presentation-ready outputs will be saved
+OUTPUT_DIR = "claims_business_outputs"
+Page 1
+# Number of categories shown in Top-N charts
+TOP_N = 15
+# If your contact-method column uses a different separator, add it here.
+CONTACT_SPLIT_REGEX = r"[>,;|/]+"
+# Whether to save every chart as a high-resolution PNG
+SAVE_PNG = True
+# ============================================================
+# Expected columns
+# ============================================================
+EXPECTED_COLUMNS = [
+    "LOSS_SK",
+    "LINE_OF_BUSINESS",
+    "CAT_IND",
+    "NEW_SEGMENT",
+    "CONTACT_METHOD",
+    "CAUSE_CHANGE_COUNT",
+    "SEGMENT_SEQUENCE",
+    "SEGMENT_TRANFER_COUN",
+    "FNOL_EFF_DIFF",
+    "CAUSE_DAYS_DISTRIBUTION"
+]
+Code Cell 2
+# ============================================================
+# 1. IMPORTS
+# ============================================================
+import os
+import re
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from IPython.display import display, Markdown
+warnings.filterwarnings("ignore")
+pd.set_option("display.max_columns", 100)
+pd.set_option("display.max_rows", 100)
+pd.set_option("display.float_format", lambda x: f"{x:,.2f}")
+sns.set_theme(style="whitegrid")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+print("Libraries loaded.")
+Code Cell 3
+# ============================================================
+# 2. LOAD + VALIDATE CSV
+# ============================================================
+df = pd.read_csv(CSV_PATH)
+missing = [c for c in EXPECTED_COLUMNS if c not in df.columns]
+if missing:
+    raise ValueError(
+Page 2
+        "The CSV is missing these required columns:\n"
+    )
+        + "\n".join(f"- {c}" for c in missing)
+df = df[EXPECTED_COLUMNS].copy()
+# Clean text
+for c in [
+    "LOSS_SK", "LINE_OF_BUSINESS", "CAT_IND",
+    "NEW_SEGMENT", "CONTACT_METHOD",
+    "SEGMENT_SEQUENCE", "CAUSE_DAYS_DISTRIBUTION"
+]:
+    df[c] = df[c].astype("string").str.strip()
+df["CAT_IND"] = df["CAT_IND"].str.upper()
+df["NEW_SEGMENT"] = (
+    df["NEW_SEGMENT"]
+    .str.replace(r"\s+", " ", regex=True)
+    .str.strip()
+)
+# Numeric conversion
+for c in [
+    "CAUSE_CHANGE_COUNT",
+    "SEGMENT_TRANFER_COUN",
+    "FNOL_EFF_DIFF"
+]:
+    df[c] = pd.to_numeric(df[c], errors="coerce")
+print(f"Rows: {len(df):,}")
+print(f"Unique claims: {df['LOSS_SK'].nunique(dropna=True):,}")
+display(df.head())
+Code Cell 4
+# ============================================================
+# 3. DATA QUALITY CHECK
+# ============================================================
+quality = pd.DataFrame({
+    "Column": df.columns,
+    "Missing Count": [df[c].isna().sum() for c in df.columns],
+    "Missing %": [df[c].isna().mean() * 100 for c in df.columns],
+    "Unique Values": [df[c].nunique(dropna=True) for c in df.columns]
+})
+display(quality.sort_values("Missing %", ascending=False).round(2))
+print("Duplicate LOSS_SK rows:", df["LOSS_SK"].duplicated().sum())
+Code Cell 5
+# ============================================================
+# 4. CREATE THE FOUR BUSINESS VIEWS
+# ============================================================
+def business_view(row):
+    seg = str(row["NEW_SEGMENT"]).strip().lower() if pd.notna(row["NEW_SEGMENT"]) else ""
+    cat = str(row["CAT_IND"]).strip().upper() if pd.notna(row["CAT_IND"]) else ""
+    if seg == "property" and cat == "Y":
+        return "Property - Catastrophe"
+Page 3
+    if seg == "property" and cat == "N":
+        return "Property - Non-Catastrophe"
+    if seg == "non-injury":
+        return "Non-Injury"
+    return "Other / Unmapped"
+df["BUSINESS_VIEW"] = df.apply(business_view, axis=1)
+VIEWS = [
+    "Overall",
+    "Property - Catastrophe",
+    "Property - Non-Catastrophe",
+    "Non-Injury"
+]
+VIEW_DF = {
+    "Overall": df.copy(),
+    "Property - Catastrophe": df[df["BUSINESS_VIEW"] == "Property - Catastrophe"].copy(),
+    "Property - Non-Catastrophe": df[df["BUSINESS_VIEW"] == "Property - Non-Catastrophe"].copy(),
+    "Non-Injury": df[df["BUSINESS_VIEW"] == "Non-Injury"].copy()
+}
+population = pd.DataFrame({
+    "View": VIEWS,
+    "Claims": [VIEW_DF[v]["LOSS_SK"].nunique() for v in VIEWS]
+})
+population["Share %"] = population["Claims"] / population.loc[0, "Claims"] * 100
+display(population.round(2))
+A. Claim journey duration — FNOL to latest information
+Code Cell 6
+# ============================================================
+# 5. FNOL JOURNEY METRICS
+# ============================================================
+def fnol_metrics(d):
+    x = d["FNOL_EFF_DIFF"].dropna()
+    if len(x) == 0:
+        return pd.Series({
+            "Claims": 0, "Mean Days": np.nan, "Median Days": np.nan,
+            "P75 Days": np.nan, "P90 Days": np.nan, "P95 Days": np.nan,
+            "Max Days": np.nan
+        })
+    return pd.Series({
+        "Claims": len(x),
+        "Mean Days": x.mean(),
+        "Median Days": x.median(),
+        "P75 Days": x.quantile(.75),
+        "P90 Days": x.quantile(.90),
+        "P95 Days": x.quantile(.95),
+        "Max Days": x.max()
+    })
+FNOL_SUMMARY = pd.DataFrame({v: fnol_metrics(VIEW_DF[v]) for v in VIEWS}).T
+display(FNOL_SUMMARY.round(2))
+Page 4
+# Business buckets
+FNOL_BINS = [-np.inf, 7, 30, 60, 90, 180, np.inf]
+FNOL_LABELS = ["0–7 days", "8–30 days", "31–60 days", "61–90 days", "91–180 days", "181+ days"]
+def fnol_bucket_table(d):
+    x = d["FNOL_EFF_DIFF"].dropna()
+    buckets = pd.cut(x, bins=FNOL_BINS, labels=FNOL_LABELS)
+    out = buckets.value_counts(sort=False).rename("Claims").to_frame()
+    out["Share %"] = out["Claims"] / len(x) * 100 if len(x) else np.nan
+    return out
+display(fnol_bucket_table(VIEW_DF["Overall"]).round(2))
+Code Cell 7
+# ============================================================
+# 6. PRESENTATION CHART — FNOL JOURNEY BY BUSINESS VIEW
+# ============================================================
+plot_df = df[df["BUSINESS_VIEW"].isin(VIEWS[1:])].copy()
+plt.figure(figsize=(12, 6))
+sns.boxplot(
+    data=plot_df,
+    x="BUSINESS_VIEW",
+    y="FNOL_EFF_DIFF",
+    showfliers=False
+)
+plt.title("FNOL to Latest Information — Claim Journey Duration")
+plt.xlabel("")
+plt.ylabel("Days")
+plt.xticks(rotation=20)
+plt.tight_layout()
+if SAVE_PNG:
+    plt.savefig(
+        os.path.join(OUTPUT_DIR, "01_FNOL_journey_duration.png"),
+        dpi=300,
+        bbox_inches="tight"
+    )
+plt.show()
+B. Loss-cause journey — duration + first-to-last movement
+Code Cell 8
+# ============================================================
+# 7. PARSE CAUSE_DAYS_DISTRIBUTION
+# ============================================================
+def parse_cause_days(value):
+    if pd.isna(value) or str(value).strip() == "":
+        return []
+    output = []
+    for item in str(value).split(">"):
+        item = item.strip()
+        if ":" not in item:
+            continue
+        cause, days = item.rsplit(":", 1)
+        cause = cause.strip()
+Page 5
+        try:
+            days = float(days.strip())
+        except ValueError:
+            continue
+        if cause:
+            output.append((cause, days))
+    return output
+def cause_features(value):
+    parsed = parse_cause_days(value)
+    if not parsed:
+        return pd.Series({
+            "FIRST_LOSS_CAUSE": pd.NA,
+            "LAST_LOSS_CAUSE": pd.NA,
+            "TOTAL_CAUSE_DAYS": np.nan,
+            "CAUSE_STATE_COUNT": 0,
+            "CAUSE_TRANSITION_COUNT": 0,
+            "AVG_DAYS_PER_CAUSE_STATE": np.nan,
+            "MAX_DAYS_ONE_CAUSE_STATE": np.nan,
+            "FIRST_TO_LAST_CAUSE": pd.NA
+        })
+    causes = [x[0] for x in parsed]
+    days = [x[1] for x in parsed]
+    return pd.Series({
+        "FIRST_LOSS_CAUSE": causes[0],
+        "LAST_LOSS_CAUSE": causes[-1],
+        "TOTAL_CAUSE_DAYS": sum(days),
+        "CAUSE_STATE_COUNT": len(causes),
+        "CAUSE_TRANSITION_COUNT": max(len(causes) - 1, 0),
+        "AVG_DAYS_PER_CAUSE_STATE": np.mean(days),
+        "MAX_DAYS_ONE_CAUSE_STATE": max(days),
+        "FIRST_TO_LAST_CAUSE": f"{causes[0]} → {causes[-1]}"
+    })
+features = df["CAUSE_DAYS_DISTRIBUTION"].apply(cause_features)
+df = pd.concat([df, features], axis=1)
+# Refresh views
+VIEW_DF = {
+    "Overall": df.copy(),
+    "Property - Catastrophe": df[df["BUSINESS_VIEW"] == "Property - Catastrophe"].copy(),
+    "Property - Non-Catastrophe": df[df["BUSINESS_VIEW"] == "Property - Non-Catastrophe"].copy(),
+    "Non-Injury": df[df["BUSINESS_VIEW"] == "Non-Injury"].copy()
+}
+display(df[[
+    "LOSS_SK", "CAUSE_DAYS_DISTRIBUTION",
+    "FIRST_LOSS_CAUSE", "LAST_LOSS_CAUSE",
+    "TOTAL_CAUSE_DAYS", "CAUSE_STATE_COUNT",
+    "CAUSE_TRANSITION_COUNT", "AVG_DAYS_PER_CAUSE_STATE",
+    "MAX_DAYS_ONE_CAUSE_STATE"
+]].head(10))
+Page 6
+Code Cell 9
+# ============================================================
+# 8. CAUSE-DURATION SUMMARY
+# ============================================================
+CAUSE_DURATION_SUMMARY = pd.DataFrame({
+    v: {
+        "Claims": len(VIEW_DF[v]),
+        "Avg Total Cause Days": VIEW_DF[v]["TOTAL_CAUSE_DAYS"].mean(),
+        "Median Total Cause Days": VIEW_DF[v]["TOTAL_CAUSE_DAYS"].median(),
+        "P90 Total Cause Days": VIEW_DF[v]["TOTAL_CAUSE_DAYS"].quantile(.90),
+        "Avg Days per Cause State": VIEW_DF[v]["AVG_DAYS_PER_CAUSE_STATE"].mean(),
+        "Avg Cause States": VIEW_DF[v]["CAUSE_STATE_COUNT"].mean(),
+        "Avg Cause Transitions": VIEW_DF[v]["CAUSE_TRANSITION_COUNT"].mean(),
+        "Avg Longest Cause Stay": VIEW_DF[v]["MAX_DAYS_ONE_CAUSE_STATE"].mean()
+    }
+    for v in VIEWS
+}).T
+display(CAUSE_DURATION_SUMMARY.round(2))
+def explode_cause_days(d):
+    rows = []
+    for _, r in d[["LOSS_SK", "CAUSE_DAYS_DISTRIBUTION"]].iterrows():
+        for cause, days in parse_cause_days(r["CAUSE_DAYS_DISTRIBUTION"]):
+            rows.append({
+                "LOSS_SK": r["LOSS_SK"],
+                "CAUSE": cause,
+                "DAYS": days
+            })
+    return pd.DataFrame(rows)
+CAUSE_EVENTS = explode_cause_days(df)
+CAUSE_SUMMARY = (
+    CAUSE_EVENTS
+    .groupby("CAUSE")
+    .agg(
+        Claim_States=("LOSS_SK", "count"),
+        Unique_Claims=("LOSS_SK", "nunique"),
+        Total_Cause_Days=("DAYS", "sum"),
+        Avg_Days=("DAYS", "mean"),
+        Median_Days=("DAYS", "median")
+    )
+    .reset_index()
+    .sort_values("Total_Cause_Days", ascending=False)
+)
+display(CAUSE_SUMMARY.head(TOP_N).round(2))
+Code Cell 10
+# ============================================================
+# 9. PRESENTATION CHART — WHERE TIME IS SPENT
+# ============================================================
+temp = CAUSE_SUMMARY.head(TOP_N).sort_values("Total_Cause_Days")
+plt.figure(figsize=(11, 7))
+sns.barplot(
+    data=temp,
+    y="CAUSE",
+Page 7
+)
+    x="Total_Cause_Days"
+plt.title("Top Loss Causes by Total Recorded Cause-Days")
+plt.xlabel("Total Recorded Cause-Days")
+plt.ylabel("Loss Cause")
+plt.tight_layout()
+if SAVE_PNG:
+    plt.savefig(
+        os.path.join(OUTPUT_DIR, "02_loss_cause_total_days.png"),
+        dpi=300,
+        bbox_inches="tight"
+    )
+plt.show()
+Code Cell 11
+# ============================================================
+# 10. FIRST CAUSE → LAST CAUSE HEATMAPS
+# ============================================================
+def first_last_matrix(d, top_n=TOP_N):
+    x = d.dropna(subset=["FIRST_LOSS_CAUSE", "LAST_LOSS_CAUSE"]).copy()
+    common = pd.concat([
+        x["FIRST_LOSS_CAUSE"],
+        x["LAST_LOSS_CAUSE"]
+    ]).value_counts().head(top_n).index
+    x = x[
+        x["FIRST_LOSS_CAUSE"].isin(common) &
+        x["LAST_LOSS_CAUSE"].isin(common)
+    ]
+    return pd.crosstab(
+        x["FIRST_LOSS_CAUSE"],
+        x["LAST_LOSS_CAUSE"]
+    )
+for view in VIEWS:
+    matrix = first_last_matrix(VIEW_DF[view])
+    if matrix.empty:
+        print(f"No usable cause journey data for {view}")
+        continue
+    plt.figure(figsize=(12, 9))
+    sns.heatmap(matrix, annot=True, fmt="g", cmap="Blues")
+    plt.title(f"First Loss Cause → Last Loss Cause | {view}")
+    plt.xlabel("Last Loss Cause")
+    plt.ylabel("First Loss Cause")
+    plt.tight_layout()
+    if SAVE_PNG:
+        safe = re.sub(r"[^A-Za-z0-9]+", "_", view).strip("_")
+        plt.savefig(
+            os.path.join(OUTPUT_DIR, f"03_heatmap_{safe}.png"),
+            dpi=300,
+            bbox_inches="tight"
+Page 8
+        )
+    plt.show()
+Code Cell 12
+# ============================================================
+# 11. TOP FIRST → LAST JOURNEYS
+# ============================================================
+FLOW_TABLES = {}
+for view in VIEWS:
+    flow = (
+        VIEW_DF[view]
+        .dropna(subset=["FIRST_TO_LAST_CAUSE"])
+        .groupby("FIRST_TO_LAST_CAUSE")
+        .size()
+        .reset_index(name="Claims")
+        .sort_values("Claims", ascending=False)
+    )
+    FLOW_TABLES[view] = flow
+    print(f"TOP FIRST → LAST LOSS-CAUSE JOURNEYS — {view}")
+    display(flow.head(15))
+C. Line of Business — volume + journey behaviour
+Code Cell 13
+# ============================================================
+# 12. LINE OF BUSINESS BREAKDOWN
+# ============================================================
+def lob_table(d):
+    x = d.copy()
+    x["CAUSE_CHANGED"] = x["CAUSE_CHANGE_COUNT"].fillna(0) > 0
+    x["SEGMENT_TRANSFERRED"] = x["SEGMENT_TRANFER_COUN"].fillna(0) > 0
+    out = (
+        x.groupby("LINE_OF_BUSINESS", dropna=False)
+        .agg(
+            Claims=("LOSS_SK", "nunique"),
+            Median_FNOL_Days=("FNOL_EFF_DIFF", "median"),
+            Avg_FNOL_Days=("FNOL_EFF_DIFF", "mean"),
+            Avg_Total_Cause_Days=("TOTAL_CAUSE_DAYS", "mean"),
+            Avg_Cause_Changes=("CAUSE_CHANGE_COUNT", "mean"),
+            Avg_Segment_Transfers=("SEGMENT_TRANFER_COUN", "mean"),
+            Cause_Change_Rate=("CAUSE_CHANGED", "mean"),
+            Segment_Transfer_Rate=("SEGMENT_TRANSFERRED", "mean")
+        )
+        .reset_index()
+    )
+    out["Share %"] = out["Claims"] / out["Claims"].sum() * 100
+    out["Cause_Change_Rate"] *= 100
+    out["Segment_Transfer_Rate"] *= 100
+    return out.sort_values("Claims", ascending=False)
+Page 9
+LOB_TABLES = {}
+for view in VIEWS:
+    LOB_TABLES[view] = lob_table(VIEW_DF[view])
+    print(f"LINE OF BUSINESS — {view}")
+    display(LOB_TABLES[view].head(25).round(2))
+Code Cell 14
+# ============================================================
+# 13. PRESENTATION CHART — LOB VOLUME
+# ============================================================
+lob_plot = LOB_TABLES["Overall"].head(TOP_N).sort_values("Claims")
+plt.figure(figsize=(11, 7))
+sns.barplot(
+    data=lob_plot,
+    y="LINE_OF_BUSINESS",
+    x="Claims"
+)
+plt.title("Claim Volume by Line of Business — Overall")
+plt.xlabel("Unique Claims")
+plt.ylabel("Line of Business")
+plt.tight_layout()
+if SAVE_PNG:
+    plt.savefig(
+        os.path.join(OUTPUT_DIR, "04_LOB_claim_volume.png"),
+        dpi=300,
+        bbox_inches="tight"
+    )
+plt.show()
+D. Cause change « segment transfer
+Code Cell 15
+# ============================================================
+# 14. CAUSE CHANGE VS SEGMENT TRANSFER
+# ============================================================
+def trigger_analysis(d):
+    x = d.copy()
+    x["CAUSE_CHANGED"] = x["CAUSE_CHANGE_COUNT"].fillna(0) > 0
+    x["SEGMENT_CHANGED"] = x["SEGMENT_TRANFER_COUN"].fillna(0) > 0
+    cause_n = x["CAUSE_CHANGED"].sum()
+    segment_n = x["SEGMENT_CHANGED"].sum()
+    both_n = (x["CAUSE_CHANGED"] & x["SEGMENT_CHANGED"]).sum()
+    return pd.Series({
+        "Claims": len(x),
+        "Cause-change cases": cause_n,
+        "Segment-transfer cases": segment_n,
+        "Both": both_n,
+        "Cause-change → segment-transfer %":
+            both_n / cause_n * 100 if cause_n else np.nan,
+        "Segment-transfer → cause-change %":
+            both_n / segment_n * 100 if segment_n else np.nan,
+        "Both as % of all claims":
+Page 10
+    })
+            both_n / len(x) * 100 if len(x) else np.nan
+TRIGGER_SUMMARY = pd.DataFrame({
+    view: trigger_analysis(VIEW_DF[view])
+    for view in VIEWS
+}).T
+display(TRIGGER_SUMMARY.round(2))
+# Overall 2x2 matrix
+x = VIEW_DF["Overall"].copy()
+x["CAUSE_CHANGE_STATUS"] = np.where(
+    x["CAUSE_CHANGE_COUNT"].fillna(0) > 0,
+    "Cause Change",
+    "No Cause Change"
+)
+x["SEGMENT_TRANSFER_STATUS"] = np.where(
+    x["SEGMENT_TRANFER_COUN"].fillna(0) > 0,
+    "Segment Transfer",
+    "No Segment Transfer"
+)
+MATRIX = pd.crosstab(
+    x["CAUSE_CHANGE_STATUS"],
+    x["SEGMENT_TRANSFER_STATUS"]
+)
+display(MATRIX)
+Code Cell 16
+# ============================================================
+# 15. PRESENTATION CHART — CAUSE CHANGE → SEGMENT TRANSFER
+# ============================================================
+trigger_plot = TRIGGER_SUMMARY.reset_index().rename(columns={"index": "View"})
+plt.figure(figsize=(11, 6))
+sns.barplot(
+    data=trigger_plot.iloc[1:],
+    x="View",
+    y="Cause-change → segment-transfer %"
+)
+plt.title("Cause-Change Cases Also Having a Segment Transfer")
+plt.xlabel("")
+plt.ylabel("Share of Cause-Change Cases (%)")
+plt.xticks(rotation=20)
+plt.tight_layout()
+if SAVE_PNG:
+    plt.savefig(
+        os.path.join(OUTPUT_DIR, "05_cause_change_segment_transfer.png"),
+        dpi=300,
+        bbox_inches="tight"
+    )
+plt.show()
+Page 11
+E. Contact Method segmentation
+Code Cell 17
+# ============================================================
+# 16. CONTACT METHOD
+# ============================================================
+def explode_contacts(d):
+    x = d[["LOSS_SK", "CONTACT_METHOD"]].copy()
+    x["CONTACT_METHOD_EXPLODED"] = (
+        x["CONTACT_METHOD"]
+        .fillna("UNKNOWN")
+        .astype(str)
+        .apply(lambda s: [
+            z.strip().upper()
+            for z in re.split(CONTACT_SPLIT_REGEX, s)
+            if z.strip()
+        ])
+    )
+    return x.explode("CONTACT_METHOD_EXPLODED")
+def contact_table(d):
+    base = d.copy()
+    base["CAUSE_CHANGED"] = base["CAUSE_CHANGE_COUNT"].fillna(0) > 0
+    base["SEGMENT_TRANSFERRED"] = base["SEGMENT_TRANFER_COUN"].fillna(0) > 0
+    contacts = explode_contacts(base)
+    out = (
+        contacts.merge(
+            base[
+                [
+                ]
+            ],
+                    "LOSS_SK", "FNOL_EFF_DIFF", "TOTAL_CAUSE_DAYS",
+                    "CAUSE_CHANGED", "SEGMENT_TRANSFERRED"
+            on="LOSS_SK",
+            how="left"
+        )
+        .groupby("CONTACT_METHOD_EXPLODED")
+        .agg(
+            Unique_Claims=("LOSS_SK", "nunique"),
+            Median_FNOL_Days=("FNOL_EFF_DIFF", "median"),
+            Avg_Total_Cause_Days=("TOTAL_CAUSE_DAYS", "mean"),
+            Cause_Change_Rate=("CAUSE_CHANGED", "mean"),
+            Segment_Transfer_Rate=("SEGMENT_TRANSFERRED", "mean")
+        )
+        .reset_index()
+    )
+    out["Cause_Change_Rate"] *= 100
+    out["Segment_Transfer_Rate"] *= 100
+    return out.sort_values("Unique_Claims", ascending=False)
+CONTACT_TABLES = {}
+for view in VIEWS:
+Page 12
+    CONTACT_TABLES[view] = contact_table(VIEW_DF[view])
+    print(f"CONTACT METHOD — {view}")
+    display(CONTACT_TABLES[view].head(20).round(2))
+Code Cell 18
+# ============================================================
+# 17. PRESENTATION CHART — CONTACT METHOD
+# ============================================================
+contact_plot = CONTACT_TABLES["Overall"].head(TOP_N).sort_values("Unique_Claims")
+plt.figure(figsize=(11, 7))
+sns.barplot(
+    data=contact_plot,
+    y="CONTACT_METHOD_EXPLODED",
+    x="Unique_Claims"
+)
+plt.title("Claim Volume by Contact Method — Overall")
+plt.xlabel("Unique Claims")
+plt.ylabel("Contact Method")
+plt.tight_layout()
+if SAVE_PNG:
+    plt.savefig(
+        os.path.join(OUTPUT_DIR, "06_contact_method_volume.png"),
+        dpi=300,
+        bbox_inches="tight"
+    )
+plt.show()
+F. Cause-change intensity
+Code Cell 19
+# ============================================================
+# 18. CAUSE-CHANGE INTENSITY
+# ============================================================
+def cause_change_intensity(d):
+    x = d.copy()
+    x["CAUSE_CHANGE_BUCKET"] = pd.cut(
+        x["CAUSE_CHANGE_COUNT"].fillna(0),
+        bins=[-1, 0, 1, 2, 3, np.inf],
+        labels=["0", "1", "2", "3", "4+"]
+    )
+    x["SEGMENT_TRANSFERRED"] = x["SEGMENT_TRANFER_COUN"].fillna(0) > 0
+    out = (
+        x.groupby("CAUSE_CHANGE_BUCKET", observed=False)
+        .agg(
+            Claims=("LOSS_SK", "nunique"),
+            Median_FNOL_Days=("FNOL_EFF_DIFF", "median"),
+            Median_Total_Cause_Days=("TOTAL_CAUSE_DAYS", "median"),
+            Avg_Segment_Transfers=("SEGMENT_TRANFER_COUN", "mean"),
+            Segment_Transfer_Rate=("SEGMENT_TRANSFERRED", "mean")
+        )
+        .reset_index()
+Page 13
+    )
+    out["Segment_Transfer_Rate"] *= 100
+    return out
+INTENSITY_TABLES = {}
+for view in VIEWS:
+    INTENSITY_TABLES[view] = cause_change_intensity(VIEW_DF[view])
+    print(f"CAUSE-CHANGE INTENSITY — {view}")
+    display(INTENSITY_TABLES[view].round(2))
+Code Cell 20
+# ============================================================
+# 19. PRESENTATION CHART — CAUSE-CHANGE INTENSITY VS JOURNEY
+# ============================================================
+temp = INTENSITY_TABLES["Overall"].copy()
+plt.figure(figsize=(10, 6))
+sns.barplot(
+    data=temp,
+    x="CAUSE_CHANGE_BUCKET",
+    y="Median_FNOL_Days"
+)
+plt.title("Median FNOL → Latest Duration by Number of Cause Changes")
+plt.xlabel("Cause-Change Count")
+plt.ylabel("Median Days")
+plt.tight_layout()
+if SAVE_PNG:
+    plt.savefig(
+        os.path.join(OUTPUT_DIR, "07_cause_change_intensity.png"),
+        dpi=300,
+        bbox_inches="tight"
+    )
+plt.show()
+G. Automated business summary
+Code Cell 21
+# ============================================================
+# 20. AUTOMATIC BUSINESS SUMMARY
+# ============================================================
+def safe_pct(a, b):
+    return (a / b * 100) if b else np.nan
+overall = VIEW_DF["Overall"]
+cause_changed = overall["CAUSE_CHANGE_COUNT"].fillna(0) > 0
+segment_changed = overall["SEGMENT_TRANFER_COUN"].fillna(0) > 0
+both = cause_changed & segment_changed
+top_lob = LOB_TABLES["Overall"].iloc[0] if len(LOB_TABLES["Overall"]) else None
+top_cause = CAUSE_SUMMARY.iloc[0] if len(CAUSE_SUMMARY) else None
+top_flow = FLOW_TABLES["Overall"].iloc[0] if len(FLOW_TABLES["Overall"]) else None
+top_contact = CONTACT_TABLES["Overall"].iloc[0] if len(CONTACT_TABLES["Overall"]) else None
+Page 14
+summary_lines = [
+    f"• The dataset contains {overall['LOSS_SK'].nunique():,} unique claims.",
+    f"• Median FNOL → latest duration is {overall['FNOL_EFF_DIFF'].median():,.1f} days; the P90 is {overall['FNOL_EFF_DIFF'].quantile(.90):,.1f} days.",
+    f"• {safe_pct(cause_changed.sum(), len(overall)):.1f}% of claims have at least one recorded loss-cause change.",
+    f"• {safe_pct(segment_changed.sum(), len(overall)):.1f}% of claims have at least one recorded segment transfer.",
+    f"• Among claims with a cause change, {safe_pct(both.sum(), cause_changed.sum()):.1f}% also have a segment transfer.",
+]
+if top_lob is not None:
+    summary_lines.append(
+        f"• The highest-volume Line of Business is {top_lob['LINE_OF_BUSINESS']} "
+        f"with {int(top_lob['Claims']):,} claims ({top_lob['Share %']:.1f}% of claims)."
+    )
+if top_cause is not None:
+    summary_lines.append(
+        f"• {top_cause['CAUSE']} accounts for the largest amount of recorded cause-days "
+        f"({top_cause['Total_Cause_Days']:,.0f} days across cause states)."
+    )
+if top_flow is not None:
+    summary_lines.append(
+        f"• The most frequent first → last cause journey is {top_flow['FIRST_TO_LAST_CAUSE']} "
+        f"({int(top_flow['Claims']):,} claims)."
+    )
+if top_contact is not None:
+    summary_lines.append(
+        f"• The most common contact method is {top_contact['CONTACT_METHOD_EXPLODED']} "
+        f"({int(top_contact['Unique_Claims']):,} unique claims)."
+    )
+display(Markdown(
+    "### Presentation-ready observations\n\n" +
+    "\n".join(summary_lines)
+))
+with open(os.path.join(OUTPUT_DIR, "business_summary.txt"), "w", encoding="utf-8") as f:
+    f.write("\n".join(summary_lines))
+H. Export all business tables to Excel
+Code Cell 22
+# ============================================================
+# 21. EXPORT EXCEL PACK
+# ============================================================
+excel_path = os.path.join(OUTPUT_DIR, "claims_business_analysis.xlsx")
+with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+    population.to_excel(writer, sheet_name="Population", index=False)
+    quality.to_excel(writer, sheet_name="Data_Quality", index=False)
+    FNOL_SUMMARY.to_excel(writer, sheet_name="FNOL_Summary")
+    CAUSE_DURATION_SUMMARY.to_excel(writer, sheet_name="Cause_Duration")
+    CAUSE_SUMMARY.to_excel(writer, sheet_name="Cause_Summary", index=False)
+    TRIGGER_SUMMARY.to_excel(writer, sheet_name="Cause_Segment")
+    LOB_TABLES["Overall"].to_excel(writer, sheet_name="LOB_Overall", index=False)
+    CONTACT_TABLES["Overall"].to_excel(writer, sheet_name="Contact_Overall", index=False)
+    INTENSITY_TABLES["Overall"].to_excel(writer, sheet_name="Cause_Intensity", index=False)
+    FLOW_TABLES["Overall"].to_excel(writer, sheet_name="Top_Cause_Flows", index=False)
+Page 15
+print(f"Excel pack created: {excel_path}")
+print(f"PNG charts saved in: {OUTPUT_DIR}")
+How to use this notebook for your business presentation
+Step 1
+Put your CSV in the same folder as the notebook.
+Step 2
+Change only:
+```python
+CSV_PATH = "your_file_name.csv"
+```
+Step 3
+Run **Run All**.
+Step 4
+Use the generated outputs:- `01_FNOL_journey_duration.png`- `02_loss_cause_total_days.png`- `03_heatmap_*.png`- `04_LOB_claim_volume.png`- `05_cause_change_segment_transfer.png`- `06_contact_method_volume.png`- `07_cause_change_intensity.png`
+These are saved at **300 DPI**, so they can be inserted directly into PowerPoint.
+Suggested presentation storyline
+Page 16
+**Slide 1 — Executive overview**
+- Claim population- Median and P90 FNOL journey- Cause-change rate- Segment-transfer rate- Cause-change fi segment-transfer rate
+**Slide 2 — Claim journey duration**- FNOL journey distribution- Median vs P90- Four business populations
+**Slide 3 — Loss-cause movement**- First fi last cause heatmap- Top cause journeys- Total cause-days
+**Slide 4 — Line of Business**- Claim volume- Median journey duration- Cause-change / segment-transfer behaviour
+**Slide 5 — Cause change and segment movement**- 2×2 matrix- Cause-change fi segment-transfer rate
+**Slide 6 — Contact method**- Volume by contact method- Cause-change and segment-transfer behaviour
+**Slide 7 — Key observations**
+Page 17- Use the automatically generated business summary as the starting point for your commentary.
+Interpretation guardrails- `CAUSE_DAYS_DISTRIBUTION` describes recorded cause states and durations; repeated causes are retained as separate states.- `FIRST fi LAST` is a journey summary, not a complete transition graph.- Cause-change and segment-transfer are treated as **co-occurring events**, not proof that one caused the other.- Contact methods are exploded when multiple methods are stored in one claim, so contact-method claim counts can overlap.
+Page 18
