@@ -2299,3 +2299,86 @@ Page 16
 Page 17- Use the automatically generated business summary as the starting point for your commentary.
 Interpretation guardrails- `CAUSE_DAYS_DISTRIBUTION` describes recorded cause states and durations; repeated causes are retained as separate states.- `FIRST fi LAST` is a journey summary, not a complete transition graph.- Cause-change and segment-transfer are treated as **co-occurring events**, not proof that one caused the other.- Contact methods are exploded when multiple methods are stored in one claim, so contact-method claim counts can overlap.
 Page 18
+
+--_---))()(-&&+
+
+
+WITH HISTORY AS (
+    SELECT *,
+        LAG(LOSS_CAUSE) OVER (
+            PARTITION BY CLAIM_ID ORDER BY CHANGE_TIMESTAMP
+        ) AS PREV_CAUSE,
+        LAG(CHANGE_TIMESTAMP) OVER (
+            PARTITION BY CLAIM_ID ORDER BY CHANGE_TIMESTAMP
+        ) AS PREV_TIMESTAMP
+    FROM CLAIM_HISTORY
+)
+SELECT
+    CLAIM_ID,
+    FNOL_DATE,
+    PREV_CAUSE,
+    LOSS_CAUSE AS NEW_CAUSE,
+    DATEDIFF('DAY', FNOL_DATE, CHANGE_TIMESTAMP) AS DAY_FROM_FNOL,
+    DATEDIFF('DAY', PREV_TIMESTAMP, CHANGE_TIMESTAMP) AS DAYS_IN_PREV_CAUSE
+FROM HISTORY
+WHERE PREV_CAUSE IS NOT NULL
+  AND PREV_CAUSE <> LOSS_CAUSE;
+
+
+
+
+------++++±++++++++++++-------
+
+WITH H AS (
+    SELECT *,
+        LAG(LOSS_CAUSE) OVER (
+            PARTITION BY CLAIM_ID ORDER BY CHANGE_TIMESTAMP
+        ) AS OLD_CAUSE
+    FROM CLAIM_HISTORY
+),
+T AS (
+    SELECT *,
+        DATEDIFF('DAY', FNOL_DATE, CHANGE_TIMESTAMP) AS FNOL_DAY
+    FROM H
+    WHERE OLD_CAUSE IS NOT NULL
+      AND OLD_CAUSE <> LOSS_CAUSE
+)
+SELECT
+    OLD_CAUSE,
+    LOSS_CAUSE AS NEW_CAUSE,
+    FNOL_DAY,
+    COUNT(DISTINCT CLAIM_ID) AS CLAIMS_CHANGED
+FROM T
+WHERE OLD_CAUSE IN ('WIND', 'WATER', 'STORM')
+   OR LOSS_CAUSE IN ('WIND', 'WATER', 'STORM')
+GROUP BY 1, 2, 3
+ORDER BY 1, 2, 3;
+
+
+------+++++++++--------
+
+WITH H AS (
+    SELECT *,
+        LAG(LOSS_CAUSE) OVER (
+            PARTITION BY CLAIM_ID ORDER BY CHANGE_TIMESTAMP
+        ) AS OLD_CAUSE,
+        LAG(CHANGE_TIMESTAMP) OVER (
+            PARTITION BY CLAIM_ID ORDER BY CHANGE_TIMESTAMP
+        ) AS OLD_TIMESTAMP
+    FROM CLAIM_HISTORY
+)
+SELECT
+    OLD_CAUSE AS LOSS_CAUSE,
+    COUNT(DISTINCT CLAIM_ID) AS CLAIMS,
+    AVG(DATEDIFF('DAY', OLD_TIMESTAMP, CHANGE_TIMESTAMP))
+        AS AVG_DAYS_BEFORE_CHANGE,
+    MEDIAN(DATEDIFF('DAY', OLD_TIMESTAMP, CHANGE_TIMESTAMP))
+        AS MEDIAN_DAYS_BEFORE_CHANGE
+FROM H
+WHERE OLD_CAUSE IN ('WIND', 'WATER', 'STORM')
+  AND OLD_CAUSE <> LOSS_CAUSE
+GROUP BY 1;
+
+
+
+
